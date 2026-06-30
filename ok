@@ -1,3 +1,9 @@
+-- debugLog must be defined first
+local function debugLog(msg)
+    print("[Cactus Hub Debug] " .. os.date("%H:%M:%S") .. " - " .. msg)
+end
+debugLog("Script started")
+
 task.spawn(function()
     local idledConns = typeof(getconnections) == "function" and getconnections(game.Players.LocalPlayer.Idled) or {}
     for _, conn in ipairs(idledConns) do conn:Disable() end
@@ -17,13 +23,6 @@ local userId = player.UserId
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local HttpService = game:GetService("HttpService")
-
--- Debug logger
-local function debugLog(msg)
-    print("[Cactus Hub Debug] " .. os.date("%H:%M:%S") .. " - " .. msg)
-end
-
-debugLog("Script started")
 
 local executorName = typeof(identifyexecutor) == "function" and identifyexecutor() or "Unknown"
 
@@ -1415,7 +1414,7 @@ mainTab:CreateParagraph({ Title = "Anti AFK", Content = "[+] Anti AFK is active"
 mainTab:CreateSection("Update Log")
 mainTab:CreateParagraph({
     Title = "Update Log",
-    Content = "[+] Auto Place blacklist dropdown\n[+] Auto Place skips items already on plot\n[+] Auto Decline from customers\n[+] Farming cooldown when car is full\n[+] Dynamic auction areas from game data\n[+] Per‑garage selection with entry cost\n[+] Auto Grade before placing\n[+] Auto Clean before placing\n[+] Disable notifications toggle\n[/] Fixed auto farm going to garages you cant afford\n[/] Fixed drinks not handling all selected types\n[/] Fixed wash and grade skipping valid items\n[/] Fixed upgrade purchases\n[/] Fixed race condition – strict state machine, master loop owns joining\n[/] Added debug logging to pinpoint nil call"
+    Content = "[+] Auto Place blacklist dropdown\n[+] Auto Place skips items already on plot\n[+] Auto Decline from customers\n[+] Farming cooldown when car is full\n[+] Dynamic auction areas from game data\n[+] Per‑garage selection with entry cost\n[+] Auto Grade before placing\n[+] Auto Clean before placing\n[+] Disable notifications toggle\n[/] Fixed auto farm going to garages you cant afford\n[/] Fixed drinks not handling all selected types\n[/] Fixed wash and grade skipping valid items\n[/] Fixed upgrade purchases\n[/] Fixed race condition – strict state machine, master loop owns joining\n[/] Added debug logging – defined debugLog to fix nil call"
 })
 
 local autoBidToggle
