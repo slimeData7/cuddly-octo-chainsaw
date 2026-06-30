@@ -191,7 +191,9 @@ local upgradeLoopRunning = false
 local lostLoopRunning = false
 local unloadLoopRunning = false
 local pickupLoopRunning = false
+local farmLoopRunning = false
 local placeLoopRunning = false
+local fullFarmLoopRunning = false
 local drinksLoopRunning = false
 local dailyRewardLoopRunning = false
 local selectedUpgrades = {}
@@ -203,6 +205,8 @@ local allGradeRarities = false
 local gradeMethod = "Rarity"
 local selectedDrinkIds = {}
 local thresholdCheckedForAuction = false
+local isFarmCycleRunning = false
+local weightCooldownActive = false
 local fpsBoostEnabled = false
 local rendering3dEnabled = true
 
@@ -223,20 +227,6 @@ for _, def in pairs(FurnitureModule.Items) do
     end
 end
 table.sort(shelfNames)
-
--- Auction State Machine
-local AuctionState = {
-    SEARCHING = "Searching",
-    JOINING = "Joining",
-    IN_AUCTION = "InAuction",
-    PROCESSING = "Processing",
-    FINISHED = "Finished"
-}
-
-local currentState = AuctionState.SEARCHING
-local stateLock = false
-local masterLoopRunning = false
-local masterLoopCoroutine = nil
 
 local function findBestAffordableGarage(areaName, garageId)
     local debris = workspace:FindFirstChild("_Debris")
@@ -993,103 +983,133 @@ local function runAutoDrinks()
     end
 end
 
--- Single attempt to join an auction. Returns true if joined, false if failed.
-local function attemptJoinAuction()
-    if currentState ~= AuctionState.SEARCHING then
-        return false
-    end
-    if stateLock then return false end
-    stateLock = true
+local function joinAuction()
+    if inAuction then return end
+    while autoFarmEnabled or autoFarmEverything do
+        if inAuction then break end
 
-    local success = false
-    local function cleanup()
-        stateLock = false
-        if not success then
-            currentState = AuctionState.SEARCHING
-        end
-    end
+        local bestGarage, cheapestCost = findBestAffordableGarage(selectedArea, selectedGarageId)
+        local cash = player:GetAttribute("Cash") or 0
 
-    -- Find garage
-    local bestGarage, cheapestCost = findBestAffordableGarage(selectedArea, selectedGarageId)
-    local cash = player:GetAttribute("Cash") or 0
-    if not bestGarage then
-        if cheapestCost ~= math.huge and cash < cheapestCost then
-            notify("Auto Farm — Need $" .. tostring(math.floor(cheapestCost)) .. " to enter, have $" .. tostring(math.floor(cash)) .. ". Waiting...")
-        else
-            local areaLabel = selectedArea or "Unknown"
-            if selectedGarageId then
-                local garageData = GarageConfig[selectedGarageId]
-                if garageData then
-                    areaLabel = areaLabel .. " - " .. garageData.Name
+        if not bestGarage then
+            if cheapestCost ~= math.huge and cash < cheapestCost then
+                notify("Auto Farm — Need $" .. tostring(math.floor(cheapestCost)) .. " to enter, have $" .. tostring(math.floor(cash)) .. ". Waiting...")
+            else
+                local areaLabel = selectedArea or "Unknown"
+                if selectedGarageId then
+                    local garageData = GarageConfig[selectedGarageId]
+                    if garageData then
+                        areaLabel = areaLabel .. " - " .. garageData.Name
+                    end
                 end
+                notify("Auto Farm — No garage found for " .. areaLabel .. ", retrying...")
             end
-            notify("Auto Farm — No garage found for " .. areaLabel .. ", retrying...")
+            task.wait(1)
+            continue
         end
-        cleanup()
-        return false
-    end
 
-    local prompt = bestGarage:FindFirstChild("EnterAuction", true)
-    if not prompt then
-        notify("Auto Farm — No entry prompt found, retrying...")
-        cleanup()
-        return false
-    end
-
-    -- Move character near prompt
-    local promptParent = prompt.Parent
-    local promptParentCFrame = promptParent:IsA("BasePart") and promptParent.CFrame or promptParent:GetPivot()
-    local char = player.Character or player.CharacterAdded:Wait()
-    local hrp = char:WaitForChild("HumanoidRootPart")
-    hrp.CFrame = CFrame.new(promptParentCFrame.Position + Vector3.new(0, 3, 0))
-    task.wait(0.3)
-
-    if inAuction then
-        -- Already in auction somehow
-        currentState = AuctionState.IN_AUCTION
-        success = true
-        cleanup()
-        return true
-    end
-
-    -- Fire prompt
-    fireproximityprompt(prompt)
-    local label = selectedArea or "Unknown"
-    if selectedGarageId then
-        local garageData = GarageConfig[selectedGarageId]
-        if garageData then
-            label = label .. " - " .. garageData.Name
+        local prompt = bestGarage:FindFirstChild("EnterAuction", true)
+        if not prompt then
+            notify("Auto Farm — No entry prompt found, retrying...")
+            task.wait(1)
+            continue
         end
-    end
-    notify("Auto Farm — Joining " .. label .. " auction")
 
-    -- Set state to JOINING and wait for inAuction
-    currentState = AuctionState.JOINING
-    local start = os.clock()
-    local timeout = 8 -- seconds
-    while not inAuction and os.clock() - start < timeout do
-        task.wait(0.1)
-    end
+        local promptParent = prompt.Parent
+        local promptParentCFrame = promptParent:IsA("BasePart") and promptParent.CFrame or promptParent:GetPivot()
 
-    if inAuction then
-        currentState = AuctionState.IN_AUCTION
-        success = true
-        notify("Auto Farm — Joined auction")
-    else
-        notify("Auto Farm — Failed to join auction (timeout)")
-        currentState = AuctionState.SEARCHING
-        success = false
-    end
+        local char = player.Character or player.CharacterAdded:Wait()
+        local hrp = char:WaitForChild("HumanoidRootPart")
+        hrp.CFrame = CFrame.new(promptParentCFrame.Position + Vector3.new(0, 3, 0))
+        task.wait(0.3)
+        if inAuction then break end
 
-    cleanup()
-    return success
+        fireproximityprompt(prompt)
+        local label = selectedArea or "Unknown"
+        if selectedGarageId then
+            local garageData = GarageConfig[selectedGarageId]
+            if garageData then
+                label = label .. " - " .. garageData.Name
+            end
+        end
+        notify("Auto Farm — Joining " .. label .. " auction")
+
+        local start = os.clock()
+        while not inAuction and os.clock() - start < 3 do
+            task.wait(0.1)
+        end
+
+        if inAuction then break end
+
+        task.wait(1)
+    end
 end
 
-local function processContainer()
-    if currentState ~= AuctionState.IN_AUCTION and currentState ~= AuctionState.PROCESSING then
+local function waitForBoxesOpened(timeout)
+    timeout = timeout or 30
+    local start = tick()
+    while tick() - start < timeout do
+        local hasPrompt = false
+        for _, model in ipairs(getCarryables()) do
+            if model:FindFirstChild("OpenBoxPrompt", true) then
+                hasPrompt = true
+                break
+            end
+        end
+        if not hasPrompt then return true end
+        task.wait(0.2)
+    end
+    return false
+end
+
+local function waitForRepairsComplete(timeout)
+    timeout = timeout or 15
+    local start = tick()
+    while tick() - start < timeout do
+        local hasRepair = false
+        for _, model in ipairs(getCarryables()) do
+            if model:GetAttribute("ItemsWonGUID") then
+                hasRepair = true
+                break
+            end
+        end
+        if not hasRepair then return true end
+        task.wait(0.3)
+    end
+    return false
+end
+
+local function waitForNoCarryables(timeout)
+    timeout = timeout or 30
+    local start = tick()
+    while tick() - start < timeout do
+        local count = 0
+        for _, model in ipairs(getCarryables()) do
+            if model:GetAttribute("Owner") == userId then
+                count = count + 1
+            end
+        end
+        if count == 0 then return true end
+        task.wait(0.3)
+    end
+    return false
+end
+
+local function waitForUnloadComplete(timeout)
+    timeout = timeout or 10
+    local start = tick()
+    while tick() - start < timeout do
+        if not vehicleHasItems() then return true end
+        task.wait(0.3)
+    end
+    return false
+end
+
+local function runFarmCycle()
+    if isFarmCycleRunning then
         return
     end
-    currentState = AuctionState.PROCESSING
+    isFarmCycleRunning = true
 
     local ok, err = pcall(function()
         local allItems = getCarryables()
@@ -1179,109 +1199,14 @@ local function processContainer()
         end
 
         fullGarageDump()
+        joinAuction()
     end)
 
     if not ok then
-        notify("Auto Farm — Container processing error: " .. tostring(err))
+        notify("Auto Farm — Cycle error: " .. tostring(err))
     end
 
-    currentState = AuctionState.FINISHED
-end
-
-local function waitForBoxesOpened(timeout)
-    timeout = timeout or 30
-    local start = tick()
-    while tick() - start < timeout do
-        local hasPrompt = false
-        for _, model in ipairs(getCarryables()) do
-            if model:FindFirstChild("OpenBoxPrompt", true) then
-                hasPrompt = true
-                break
-            end
-        end
-        if not hasPrompt then return true end
-        task.wait(0.2)
-    end
-    return false
-end
-
-local function waitForRepairsComplete(timeout)
-    timeout = timeout or 15
-    local start = tick()
-    while tick() - start < timeout do
-        local hasRepair = false
-        for _, model in ipairs(getCarryables()) do
-            if model:GetAttribute("ItemsWonGUID") then
-                hasRepair = true
-                break
-            end
-        end
-        if not hasRepair then return true end
-        task.wait(0.3)
-    end
-    return false
-end
-
-local function waitForNoCarryables(timeout)
-    timeout = timeout or 30
-    local start = tick()
-    while tick() - start < timeout do
-        local count = 0
-        for _, model in ipairs(getCarryables()) do
-            if model:GetAttribute("Owner") == userId then
-                count = count + 1
-            end
-        end
-        if count == 0 then return true end
-        task.wait(0.3)
-    end
-    return false
-end
-
-local function waitForUnloadComplete(timeout)
-    timeout = timeout or 10
-    local start = tick()
-    while tick() - start < timeout do
-        if not vehicleHasItems() then return true end
-        task.wait(0.3)
-    end
-    return false
-end
-
-local function startMasterLoop()
-    if masterLoopRunning then return end
-    if not (autoFarmEnabled or autoFarmEverything) then return end
-
-    masterLoopRunning = true
-    masterLoopCoroutine = task.spawn(function()
-        while autoFarmEnabled or autoFarmEverything do
-            if currentState == AuctionState.SEARCHING then
-                local joined = attemptJoinAuction()
-                if not joined then
-                    -- Wait a bit before retrying
-                    task.wait(1)
-                end
-            elseif currentState == AuctionState.IN_AUCTION then
-                -- Wait until auction ends (inAuction becomes false)
-                while inAuction do
-                    task.wait(0.5)
-                end
-                -- Auction ended, process container
-                processContainer()
-                -- After processing, state will be FINISHED
-            elseif currentState == AuctionState.JOINING then
-                -- Wait for join to finish (handled in attemptJoinAuction)
-                task.wait(0.5)
-            elseif currentState == AuctionState.PROCESSING then
-                task.wait(0.5)
-            elseif currentState == AuctionState.FINISHED then
-                currentState = AuctionState.SEARCHING
-            end
-            task.wait(0.1)
-        end
-        masterLoopRunning = false
-        masterLoopCoroutine = nil
-    end)
+    isFarmCycleRunning = false
 end
 
 if UpdateCurrentWinningBid then
@@ -1305,13 +1230,8 @@ if ToggleBiddingUI then
             if inAuction then
                 notify("Auto Bid — Auction started")
                 thresholdCheckedForAuction = false
-                -- If we were in JOINING state, this will be caught by the loop
-                if currentState == AuctionState.JOINING then
-                    currentState = AuctionState.IN_AUCTION
-                end
             else
                 notify("Auto Farm — Auction ended")
-                -- If we were in IN_AUCTION, the master loop will handle processing
             end
         end)
     end)
@@ -1382,7 +1302,7 @@ mainTab:CreateParagraph({ Title = "Anti AFK", Content = "[+] Anti AFK is active"
 mainTab:CreateSection("Update Log")
 mainTab:CreateParagraph({
     Title = "Update Log",
-    Content = "[+] Auto Place blacklist dropdown\n[+] Auto Place skips items already on plot\n[+] Auto Decline from customers\n[+] Farming cooldown when car is full\n[+] Dynamic auction areas from game data\n[+] Per‑garage selection with entry cost\n[+] Auto Grade before placing\n[+] Auto Clean before placing\n[+] Disable notifications toggle\n[/] Fixed auto farm going to garages you cant afford\n[/] Fixed drinks not handling all selected types\n[/] Fixed wash and grade skipping valid items\n[/] Fixed upgrade purchases\n[/] Fixed race condition – strict state machine ensures single auction at a time"
+    Content = "[+] Auto Place blacklist dropdown\n[+] Auto Place skips items already on plot\n[+] Auto Decline from customers\n[+] Farming cooldown when car is full\n[+] Dynamic auction areas from game data\n[+] Per‑garage selection with entry cost\n[+] Auto Grade before placing\n[+] Auto Clean before placing\n[+] Disable notifications toggle\n[/] Fixed auto farm going to garages you cant afford\n[/] Fixed drinks not handling all selected types\n[/] Fixed wash and grade skipping valid items\n[/] Fixed upgrade purchases"
 })
 
 local autoBidToggle
@@ -1428,10 +1348,21 @@ fullFarmToggle = farmingTab:CreateToggle({
             end)
             notify("Auto Farm Everything — Started")
             fullGarageDump()
-            currentState = AuctionState.SEARCHING
-            startMasterLoop()
+            if not fullFarmLoopRunning then
+                fullFarmLoopRunning = true
+                task.spawn(function()
+                    while autoFarmEverything do
+                        if not inAuction and not isFarmCycleRunning then
+                            runFarmCycle()
+                        end
+                        task.wait(1)
+                    end
+                    fullFarmLoopRunning = false
+                end)
+            end
         else
             autoFarmEverything = false
+            fullFarmLoopRunning = false
             autoBidEnabled = false
             autoFarmEnabled = false
             autoPickupEnabled = false
@@ -1557,9 +1488,15 @@ autoFarmAuctionToggle = farmingTab:CreateToggle({
     Flag = "AutoFarmToggle",
     Callback = function(val)
         autoFarmEnabled = val
-        if val then
-            currentState = AuctionState.SEARCHING
-            startMasterLoop()
+        if val and not farmLoopRunning then
+            farmLoopRunning = true
+            task.spawn(function()
+                while autoFarmEnabled do
+                    if not inAuction then runFarmCycle() end
+                    task.wait(1)
+                end
+                farmLoopRunning = false
+            end)
         end
     end,
 })
@@ -1574,50 +1511,8 @@ autoPickupToggle = farmingTab:CreateToggle({
             pickupLoopRunning = true
             task.spawn(function()
                 while autoPickupEnabled do
-                    if not inAuction then
-                        local allItems = getCarryables()
-                        if #allItems == 0 then task.wait(1) continue end
-                        openBoxes(allItems)
-                        local resolved = waitForBoxesResolved(8)
-                        if not resolved then
-                            notify("Auto Pickup — Some boxes took too long, continuing anyway")
-                        end
-                        allItems = getCarryables()
-                        local eligible = {}
-                        for _, model in ipairs(allItems) do
-                            if getCarryableValue(model) >= minPickupValue then
-                                table.insert(eligible, model)
-                            end
-                        end
-                        if #eligible == 0 then
-                            notify("Auto Pickup — No items meet min value $" .. tostring(minPickupValue))
-                            task.wait(1)
-                            continue
-                        end
-                        local currentWeight, maxWeight = getVehicleCurrentWeight()
-                        if maxWeight > 0 and currentWeight >= maxWeight then
-                            notify("Auto Pickup — Vehicle overweight, skipping")
-                            task.wait(1)
-                            continue
-                        end
-                        if getVehicleDistance() > 10 then
-                            notify("Auto Pickup — Car too far, respawning")
-                            spawnAndEnterCar()
-                        end
-                        for _, model in ipairs(eligible) do
-                            local guid = model:GetAttribute("ItemsWonGUID")
-                            if guid and RepairWonItem then
-                                RepairWonItem:InvokeServer(guid)
-                                task.wait(0.3 + math.random() * 0.2)
-                            end
-                        end
-                        notify("Auto Pickup — Picking up " .. tostring(#eligible) .. " item(s)")
-                        pickupAll(eligible)
-                        notify("Auto Pickup — Done")
-                        task.wait(0.5)
-                    else
-                        task.wait(1)
-                    end
+                    if not inAuction then runPickupStandalone() end
+                    task.wait(1)
                 end
                 pickupLoopRunning = false
             end)
