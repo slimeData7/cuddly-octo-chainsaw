@@ -1,0 +1,2085 @@
+task.spawn(function()
+    local idledConns = typeof(getconnections) == "function" and getconnections(game.Players.LocalPlayer.Idled) or {}
+    for _, conn in ipairs(idledConns) do conn:Disable() end
+    local VirtualUser = game:GetService("VirtualUser")
+    game.Players.LocalPlayer.Idled:Connect(function()
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.new())
+    end)
+end)
+
+repeat task.wait() until game:IsLoaded()
+
+local Players = game:GetService("Players")
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+local userId = player.UserId
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local HttpService = game:GetService("HttpService")
+
+local executorName = typeof(identifyexecutor) == "function" and identifyexecutor() or "Unknown"
+
+local Toasts = require(ReplicatedStorage.Modules.Screens.Toasts)
+
+local lastNotifyMsg = ""
+local lastNotifyTime = 0
+local NOTIFY_COOLDOWN = 5
+local notificationsDisabled = false
+
+local function notify(msg)
+    if notificationsDisabled then return end
+    if type(msg) ~= "string" then return end
+    if not Toasts then return end
+    local now = tick()
+    if msg == lastNotifyMsg and now - lastNotifyTime < NOTIFY_COOLDOWN then return end
+    lastNotifyMsg = msg
+    lastNotifyTime = now
+    Toasts:Show("[Cactus Hub] " .. msg)
+end
+
+local canDestroy = true
+do
+    local p = Instance.new("Part")
+    p:Destroy()
+end
+
+local Events = ReplicatedStorage:WaitForChild("Events")
+local AuctionEvents = Events:WaitForChild("Auction")
+local BidEvent = AuctionEvents:WaitForChild("Bid")
+local ToggleBiddingUI = AuctionEvents:WaitForChild("ToggleBiddingUI")
+local LostFoundOverride = AuctionEvents:WaitForChild("LostFoundOverride")
+local UpdateCurrentWinningBid = AuctionEvents:WaitForChild("UpdateCurrentWinningBid")
+local LeaveAuction = AuctionEvents:WaitForChild("LeaveAuction")
+local VehicleEvents = Events:WaitForChild("Vehicles")
+local RequestSpawn = VehicleEvents:WaitForChild("RequestSpawn")
+local TransferItems = VehicleEvents:WaitForChild("TransferVehicleItemsToInventory")
+local GetVehicleItems = VehicleEvents:WaitForChild("GetVehicleItems")
+local UIEvents = Events:WaitForChild("UI")
+local GetLostItems = UIEvents:WaitForChild("GetLostItems")
+local ClaimLostItem = UIEvents:WaitForChild("ClaimLostItem")
+local UseEnergyDrink = UIEvents:WaitForChild("UseEnergyDrink")
+local CollectionEvents = Events:WaitForChild("Collections")
+local GetState = CollectionEvents:WaitForChild("GetCollectionState")
+local ClaimMilestone = CollectionEvents:WaitForChild("ClaimMilestoneReward")
+local AchievementEvents = Events:WaitForChild("Achievements")
+local GetStatus = AchievementEvents:WaitForChild("GetAchievementStatus")
+local ClaimAchievement = AchievementEvents:WaitForChild("ClaimAchievementReward")
+local UpgradeEvents = Events:WaitForChild("Upgrades")
+local BuyUpgrade = UpgradeEvents:WaitForChild("BuyUpgrade")
+local GetUpgrades = UpgradeEvents:WaitForChild("GetUpgrades")
+local WashEvents = Events:WaitForChild("Wash")
+local GetWashableItems = WashEvents:WaitForChild("GetWashableItems")
+local StartWash = WashEvents:WaitForChild("StartWash")
+local GetWashSlotState = WashEvents:WaitForChild("GetSlotState")
+local CollectWash = WashEvents:WaitForChild("CollectWash")
+local ClaimWashedItem = WashEvents:WaitForChild("ClaimWashedItem")
+local GradingEvents = Events:WaitForChild("Grading")
+local GetGradableItems = GradingEvents:WaitForChild("GetGradableItems")
+local StartGrading = GradingEvents:WaitForChild("StartGrading")
+local GetGradeSlotState = GradingEvents:WaitForChild("GetSlotState")
+local CollectGrade = GradingEvents:WaitForChild("CollectGrade")
+local ClaimGradedItem = GradingEvents:WaitForChild("ClaimGradedItem")
+local WrenchEvents = Events:WaitForChild("WrenchShop")
+local RepairWonItem = WrenchEvents:WaitForChild("RepairWonItem")
+local NPCEvents = Events:WaitForChild("NPCShopper")
+local showOffer = NPCEvents:WaitForChild("ShowOffer")
+local respondOffer = NPCEvents:WaitForChild("RespondOffer")
+local InventoryEvents = Events:WaitForChild("Inventory")
+local getInventory = InventoryEvents:WaitForChild("GetPlayerInventory")
+local PlotEvents = Events:WaitForChild("Plot")
+local placeStockRemote = PlotEvents:WaitForChild("PlaceStockItem")
+local DailyRewardEvents = Events:WaitForChild("DailyReward")
+local ClaimDailyReward = DailyRewardEvents:WaitForChild("ClaimDailyReward")
+local EnergyShopEvents = Events:WaitForChild("EnergyShop")
+local GetCatalog = EnergyShopEvents:WaitForChild("GetCatalog")
+local BuyDrink = EnergyShopEvents:WaitForChild("BuyDrink")
+
+local Items = require(ReplicatedStorage.Modules.Items)
+local Areas = require(ReplicatedStorage.Modules.Areas)
+local GarageConfig = require(ReplicatedStorage.Modules.Garages)
+local MutatorModule = require(ReplicatedStorage.Modules.MutatorModule)
+local FurnitureModule = require(ReplicatedStorage.Modules.Furniture)
+local GradingConfig = require(ReplicatedStorage.Modules.GameConfig).Grading
+local UpgradesConfig = require(ReplicatedStorage.Modules.ShopUpgradesConfig)
+local EnergyDrinks = require(ReplicatedStorage.Modules.EnergyDrinks)
+
+local ActionQueue = {}
+do
+    local _lock = false
+    local _executing = nil
+    function ActionQueue.acquire(actionName, timeoutSeconds)
+        timeoutSeconds = timeoutSeconds or 1
+        local startTime = os.clock()
+        while os.clock() - startTime < timeoutSeconds do
+            if not _lock then
+                _lock = true
+                _executing = actionName
+                return true
+            end
+            task.wait()
+        end
+        return false
+    end
+    function ActionQueue.release(actionName)
+        if _executing == actionName then
+            _executing = nil
+            _lock = false
+        end
+    end
+    function ActionQueue.current()
+        return _executing
+    end
+end
+
+local autoBidEnabled = false
+local autoFarmEnabled = false
+local autoPickupEnabled = false
+local autoUnloadEnabled = false
+local autoClaimCollections = false
+local autoClaimAchievements = false
+local autoClaimLostEnabled = false
+local autoAcceptOffers = false
+local autoDeclineEnabled = false
+local autoPlaceItems = false
+local autoUpgradeEnabled = false
+local autoWashEnabled = false
+local autoGradeEnabled = false
+local autoFarmEverything = false
+local autoUseDrinksEnabled = false
+local autoDailyRewardEnabled = false
+local autoGradeBeforePlace = false
+local autoCleanBeforePlace = false
+local connection = nil
+local lastBidTime = 0
+local BID_COOLDOWN = 0.2
+local inAuction = false
+local selectedArea = nil
+local selectedGarageId = nil
+local bidMode = "Always"
+local specificItemNames = {"", "", ""}
+local minPercent = 0
+local minAuctionThreshold = 0
+local minPickupValue = 0
+local unloadMode = "Unload when full"
+local collectionLoopRunning = false
+local achievementLoopRunning = false
+local washLoopRunning = false
+local gradeLoopRunning = false
+local upgradeLoopRunning = false
+local lostLoopRunning = false
+local unloadLoopRunning = false
+local pickupLoopRunning = false
+local placeLoopRunning = false
+local drinksLoopRunning = false
+local dailyRewardLoopRunning = false
+local selectedUpgrades = {}
+local allUpgrades = true
+local selectedWashRarities = {}
+local allWashRarities = false
+local selectedGradeRarities = {}
+local allGradeRarities = false
+local gradeMethod = "Rarity"
+local selectedDrinkIds = {}
+local thresholdCheckedForAuction = false
+local fpsBoostEnabled = false
+local rendering3dEnabled = true
+
+local placeBlacklist = {
+    Mutated = false, Safes = false, Consumables = false,
+    Accessories = false, Vehicles = false, Drinks = false,
+    Broken = false, Dirty = false, Favorited = false,
+}
+
+local rarityOrder = { Junk = 1, Uncommon = 2, Rare = 3, Epic = 4, Legendary = 5, Mythical = 6 }
+
+local selectedShelves = {}
+local shelfNames = {}
+for _, def in pairs(FurnitureModule.Items) do
+    if def.Category == "Shelves" then
+        table.insert(shelfNames, def.Name)
+        selectedShelves[def.Name] = true
+    end
+end
+table.sort(shelfNames)
+
+local AuctionState = {
+    IDLE = "IDLE",
+    SEARCHING = "SEARCHING",
+    JOINING = "JOINING",
+    IN_AUCTION = "IN_AUCTION",
+    PROCESSING = "PROCESSING",
+    FINISHED = "FINISHED"
+}
+local currentState = AuctionState.IDLE
+local masterLoopRunning = false
+local masterLoopCoroutine = nil
+
+local function waitForAuctionStart(timeout)
+    timeout = timeout or 8
+    local start = os.clock()
+    while not inAuction and os.clock() - start < timeout do
+        task.wait(0.1)
+    end
+    return inAuction
+end
+
+local function attemptJoinAuction()
+    if currentState ~= AuctionState.SEARCHING then
+        return false
+    end
+
+    local bestGarage, cheapestCost = findBestAffordableGarage(selectedArea, selectedGarageId)
+    local cash = player:GetAttribute("Cash") or 0
+    if not bestGarage then
+        if cheapestCost ~= math.huge and cash < cheapestCost then
+            notify("Auto Farm — Need $" .. tostring(math.floor(cheapestCost)) .. " to enter, have $" .. tostring(math.floor(cash)) .. ". Waiting...")
+        else
+            local areaLabel = selectedArea or "Unknown"
+            if selectedGarageId then
+                local garageData = GarageConfig[selectedGarageId]
+                if garageData then
+                    areaLabel = areaLabel .. " - " .. garageData.Name
+                end
+            end
+            notify("Auto Farm — No garage found for " .. areaLabel .. ", retrying...")
+        end
+        return false
+    end
+
+    local prompt = bestGarage:FindFirstChild("EnterAuction", true)
+    if not prompt then
+        notify("Auto Farm — No entry prompt found, retrying...")
+        return false
+    end
+
+    local promptParent = prompt.Parent
+    local promptParentCFrame = promptParent:IsA("BasePart") and promptParent.CFrame or promptParent:GetPivot()
+    local char = player.Character or player.CharacterAdded:Wait()
+    local hrp = char:WaitForChild("HumanoidRootPart")
+    hrp.CFrame = CFrame.new(promptParentCFrame.Position + Vector3.new(0, 3, 0))
+    task.wait(0.3)
+
+    if inAuction then
+        currentState = AuctionState.IN_AUCTION
+        return true
+    end
+
+    fireproximityprompt(prompt)
+    local label = selectedArea or "Unknown"
+    if selectedGarageId then
+        local garageData = GarageConfig[selectedGarageId]
+        if garageData then
+            label = label .. " - " .. garageData.Name
+        end
+    end
+    notify("Auto Farm — Joining " .. label .. " auction")
+
+    currentState = AuctionState.JOINING
+    local joined = waitForAuctionStart(8)
+
+    if joined then
+        currentState = AuctionState.IN_AUCTION
+        notify("Auto Farm — Joined auction")
+        return true
+    else
+        notify("Auto Farm — Failed to join auction (timeout)")
+        currentState = AuctionState.SEARCHING
+        return false
+    end
+end
+
+local function processContainer()
+    if currentState ~= AuctionState.IN_AUCTION then
+        return
+    end
+    currentState = AuctionState.PROCESSING
+
+    local allItems = getCarryables()
+    local boxes = {}
+    for _, model in ipairs(allItems) do
+        if model:FindFirstChild("OpenBoxPrompt", true) then
+            table.insert(boxes, model)
+        end
+    end
+    if #boxes > 0 then
+        notify("Auto Farm — Opening " .. tostring(#boxes) .. " box(es)")
+        openBoxes(boxes)
+        local opened = waitForBoxesOpened(30)
+        if not opened then
+            notify("Auto Farm — Boxes did not open in time, continuing anyway")
+        end
+        task.wait(0.5)
+    end
+
+    allItems = getCarryables()
+    local repairItems = {}
+    for _, model in ipairs(allItems) do
+        local guid = model:GetAttribute("ItemsWonGUID")
+        if guid and RepairWonItem then
+            table.insert(repairItems, model)
+        end
+    end
+    if #repairItems > 0 then
+        notify("Auto Farm — Repairing " .. tostring(#repairItems) .. " item(s)")
+        for _, model in ipairs(repairItems) do
+            local guid = model:GetAttribute("ItemsWonGUID")
+            if guid then
+                RepairWonItem:InvokeServer(guid)
+                task.wait(0.2)
+            end
+        end
+        local repaired = waitForRepairsComplete(15)
+        if not repaired then
+            notify("Auto Farm — Repairs did not finish in time")
+        end
+        task.wait(0.5)
+    end
+
+    allItems = getCarryables()
+    local toPickup = {}
+    for _, model in ipairs(allItems) do
+        table.insert(toPickup, model)
+    end
+    if #toPickup > 0 then
+        if getVehicleDistance() > 10 then
+            notify("Auto Farm — Car too far, respawning")
+            spawnAndEnterCar()
+        end
+        notify("Auto Farm — Picking up " .. tostring(#toPickup) .. " item(s)")
+        pickupAll(toPickup)
+        local picked = waitForNoCarryables(30)
+        if not picked then
+            notify("Auto Farm — Some items not picked up, continuing")
+        end
+        task.wait(0.5)
+    end
+
+    if isVehicleFull() then
+        notify("Auto Farm — Vehicle full, unloading")
+        doUnload()
+        local unloaded = waitForUnloadComplete(10)
+        if not unloaded then
+            notify("Auto Farm — Unload did not complete in time")
+        end
+        task.wait(0.5)
+    end
+
+    if autoWashEnabled then
+        runAutoWash()
+        task.wait(1)
+    end
+    if autoGradeEnabled then
+        runAutoGrade()
+        task.wait(1)
+    end
+    if autoPlaceItems then
+        if ActionQueue.acquire("AutoPlace", 2) then
+            placeAllItems()
+            ActionQueue.release("AutoPlace")
+            task.wait(1)
+        end
+    end
+
+    fullGarageDump()
+
+    currentState = AuctionState.FINISHED
+end
+
+local function waitForBoxesOpened(timeout)
+    timeout = timeout or 30
+    local start = tick()
+    while tick() - start < timeout do
+        local hasPrompt = false
+        for _, model in ipairs(getCarryables()) do
+            if model:FindFirstChild("OpenBoxPrompt", true) then
+                hasPrompt = true
+                break
+            end
+        end
+        if not hasPrompt then return true end
+        task.wait(0.2)
+    end
+    return false
+end
+
+local function waitForRepairsComplete(timeout)
+    timeout = timeout or 15
+    local start = tick()
+    while tick() - start < timeout do
+        local hasRepair = false
+        for _, model in ipairs(getCarryables()) do
+            if model:GetAttribute("ItemsWonGUID") then
+                hasRepair = true
+                break
+            end
+        end
+        if not hasRepair then return true end
+        task.wait(0.3)
+    end
+    return false
+end
+
+local function waitForNoCarryables(timeout)
+    timeout = timeout or 30
+    local start = tick()
+    while tick() - start < timeout do
+        local count = 0
+        for _, model in ipairs(getCarryables()) do
+            if model:GetAttribute("Owner") == userId then
+                count = count + 1
+            end
+        end
+        if count == 0 then return true end
+        task.wait(0.3)
+    end
+    return false
+end
+
+local function waitForUnloadComplete(timeout)
+    timeout = timeout or 10
+    local start = tick()
+    while tick() - start < timeout do
+        if not vehicleHasItems() then return true end
+        task.wait(0.3)
+    end
+    return false
+end
+
+local function findBestAffordableGarage(areaName, garageId)
+    local debris = workspace:FindFirstChild("_Debris")
+    local garages = debris and debris:FindFirstChild("Garages")
+    if not garages then return nil, nil end
+
+    local areaData = Areas[areaName]
+    if not areaData then return nil, nil end
+
+    local cash = player:GetAttribute("Cash") or 0
+    local bestGarage = nil
+    local bestCost = -1
+    local cheapestCost = math.huge
+
+    local garageIds = {}
+    if garageId then
+        table.insert(garageIds, garageId)
+    else
+        if areaData.GarageIds then
+            for id in pairs(areaData.GarageIds) do
+                table.insert(garageIds, id)
+            end
+        elseif areaData.SimpleGarageId then
+            table.insert(garageIds, areaData.SimpleGarageId)
+        end
+    end
+
+    for _, model in ipairs(garages:GetChildren()) do
+        if model:IsA("Model") then
+            local modelName = model.Name
+            local isInArea = false
+            for _, id in ipairs(garageIds) do
+                if modelName == id or model:GetAttribute("GarageId") == id then
+                    isInArea = true
+                    break
+                end
+            end
+            if isInArea then
+                local cost = model:GetAttribute("EntryCost") or 0
+                if cost < cheapestCost then cheapestCost = cost end
+                if cost <= cash and cost > bestCost then
+                    local prompt = model:FindFirstChild("EnterAuction", true)
+                    if prompt and prompt:IsA("ProximityPrompt") and prompt.Enabled then
+                        bestCost = cost
+                        bestGarage = model
+                    end
+                end
+            end
+        end
+    end
+    return bestGarage, cheapestCost
+end
+
+local function getVehicleId()
+    local raw = player:GetAttribute("EquippedVehicle")
+    if not raw or raw == "" then return nil end
+    return raw
+end
+
+local function getVehicleModel()
+    local rawId = getVehicleId()
+    if not rawId then return nil end
+    for _, model in ipairs(workspace:GetChildren()) do
+        if model:IsA("Model") and model:GetAttribute("VehicleGUID") == rawId then
+            return model
+        end
+    end
+    return nil
+end
+
+local function getVehicleCurrentWeight()
+    local vehicleModel = getVehicleModel()
+    if not vehicleModel then return 0, 0 end
+    local maxWeight = vehicleModel:GetAttribute("CargoWeightLimit") or 0
+    local currentWeight = vehicleModel:GetAttribute("CargoWeight") or 0
+    return currentWeight, maxWeight
+end
+
+local function isVehicleFull()
+    local current, max = getVehicleCurrentWeight()
+    return max > 0 and current >= max
+end
+
+local function vehicleHasItems()
+    local rawId = getVehicleId()
+    if not rawId or not GetVehicleItems then return false end
+    local items = GetVehicleItems:InvokeServer(rawId)
+    if type(items) ~= "table" then return false end
+    return next(items) ~= nil
+end
+
+local function getVehicleDistance()
+    local char = player.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return math.huge end
+    local vehicleModel = getVehicleModel()
+    if vehicleModel then
+        return (vehicleModel:GetPivot().Position - hrp.Position).Magnitude
+    end
+    return math.huge
+end
+
+local function isDriving()
+    local character = player.Character
+    if not character then return false end
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    return humanoid and not not (humanoid.SeatPart and humanoid.SeatPart:IsA("VehicleSeat")) or false
+end
+
+local function waitUntilDriving(timeout)
+    local start = os.clock()
+    while not isDriving() do
+        if os.clock() - start > (timeout or 15) then return false end
+        task.wait(0.5)
+    end
+    return true
+end
+
+local function spawnAndEnterCar()
+    local rawId = getVehicleId()
+    if not rawId or not RequestSpawn then return false end
+    local char = player.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return false end
+    local originalCFrame = hrp.CFrame
+    hrp.CFrame = hrp.CFrame * CFrame.new(0, 0, -15)
+    task.wait(0.1)
+    local bestGarage = findBestAffordableGarage(selectedArea, selectedGarageId)
+    local garageParts = bestGarage and bestGarage:FindFirstChild("Parts")
+    local running = true
+    task.spawn(function()
+        while running do
+            if char then
+                for _, part in ipairs(char:GetDescendants()) do
+                    if part:IsA("BasePart") then part.CanCollide = false end
+                end
+            end
+            local vm = getVehicleModel()
+            if vm then
+                for _, part in ipairs(vm:GetDescendants()) do
+                    if part:IsA("BasePart") then part.CanCollide = false end
+                end
+            end
+            if garageParts then
+                for _, part in ipairs(garageParts:GetDescendants()) do
+                    if part:IsA("BasePart") then part.CanCollide = false end
+                end
+            end
+            task.wait()
+        end
+        if char then
+            for _, part in ipairs(char:GetDescendants()) do
+                if part:IsA("BasePart") then part.CanCollide = true end
+            end
+        end
+        local vm = getVehicleModel()
+        if vm then
+            for _, part in ipairs(vm:GetDescendants()) do
+                if part:IsA("BasePart") then part.CanCollide = true end
+            end
+        end
+        if garageParts then
+            for _, part in ipairs(garageParts:GetDescendants()) do
+                if part:IsA("BasePart") then part.CanCollide = true end
+            end
+        end
+    end)
+    RequestSpawn:FireServer(rawId)
+    task.wait(2)
+    local vm = getVehicleModel()
+    if vm then
+        local seat = vm:FindFirstChildOfClass("VehicleSeat", true)
+        if seat and hrp then
+            hrp.CFrame = seat.CFrame * CFrame.new(0, 2, 0)
+        end
+    end
+    local entered = waitUntilDriving(10)
+    running = false
+    if not entered then
+        hrp.CFrame = originalCFrame
+    end
+    return entered
+end
+
+local function ensureInCar()
+    if isDriving() then return true end
+    notify("Auto — Not in car, spawning")
+    return spawnAndEnterCar()
+end
+
+local function fullGarageDump()
+    if not canDestroy then return end
+    local garages = workspace._Debris and workspace._Debris.Garages
+    if not garages then return end
+    local keepNames = { "Parts", "EntrySquare", "AuctionZone", "AuctioneerSpawn", "Floorspace", "Base" }
+    for _, garage in ipairs(garages:GetChildren()) do
+        if garage:IsA("Model") then
+            local parts = garage:FindFirstChild("Parts")
+            if parts then
+                local toDestroy = {}
+                for _, child in ipairs(parts:GetChildren()) do
+                    if child.Name ~= "EntrySquare" then table.insert(toDestroy, child) end
+                end
+                for _, child in ipairs(toDestroy) do
+                    child:Destroy()
+                end
+            end
+            local toDestroy = {}
+            for _, child in ipairs(garage:GetChildren()) do
+                local shouldKeep = false
+                for _, name in ipairs(keepNames) do
+                    if child.Name == name then shouldKeep = true break end
+                end
+                if not shouldKeep then table.insert(toDestroy, child) end
+            end
+            for _, child in ipairs(toDestroy) do
+                child:Destroy()
+            end
+        end
+    end
+end
+
+local function doUnload()
+    local rawId = getVehicleId()
+    if not rawId then return end
+    if not ensureInCar() then
+        notify("Auto Unload — Could not get in car, skipping")
+        return
+    end
+    local items = GetVehicleItems:InvokeServer(rawId)
+    if type(items) ~= "table" then return end
+    local guids = {}
+    for guid in pairs(items) do table.insert(guids, guid) end
+    if #guids == 0 then return end
+    notify("Auto Unload — Unloading " .. tostring(#guids) .. " item(s)")
+    TransferItems:FireServer(guids)
+    task.wait(0.5)
+    notify("Auto Unload — Done")
+end
+
+local function isBroken(mutators)
+    if type(mutators) ~= "table" then return false end
+    for _, m in ipairs(mutators) do
+        if m.name == "Broken" then return true end
+    end
+    return false
+end
+
+local function isDirty(mutators)
+    if type(mutators) ~= "table" then return false end
+    for _, m in ipairs(mutators) do
+        if m.name == "Dirty" then return true end
+    end
+    return false
+end
+
+local function hasMutators(mutators)
+    return type(mutators) == "table" and #mutators > 0
+end
+
+local function getMutators(raw)
+    if type(raw) == "table" then return raw end
+    if type(raw) == "string" then
+        return HttpService:JSONDecode(raw)
+    end
+    return {}
+end
+
+local function itemRarity(itemId)
+    local def = Items[tostring(itemId)]
+    return def and def.Rarity or "Uncommon"
+end
+
+local function itemBasePrice(itemId)
+    local def = Items[tostring(itemId)]
+    return def and def.BasePrice or 0
+end
+
+local function calcPrice(basePrice, entry)
+    local price = MutatorModule:CalculatePriceForEntry(basePrice, entry)
+    local grade = entry.Grade
+    if grade and GradingConfig.GradeMultipliers and GradingConfig.GradeMultipliers[grade] then
+        price = math.floor(price * GradingConfig.GradeMultipliers[grade] * 100 + 0.5) / 100
+    end
+    return price
+end
+
+local function getCarryableValue(model)
+    local itemId = tostring(model:GetAttribute("ItemId") or "")
+    if itemId == "" then return 0 end
+    local condition = model:GetAttribute("Condition") or 100
+    local mutators = getMutators(model:GetAttribute("Mutators") or "[]")
+    local itemDef = Items[itemId]
+    if not itemDef then return 0 end
+    local entry = { Condition = condition, Mutators = mutators }
+    return calcPrice(itemDef.BasePrice or 0, entry)
+end
+
+local function getCarryables()
+    local carryables = workspace:FindFirstChild("_Carryables")
+    if not carryables then return {} end
+    local mine = {}
+    for _, model in ipairs(carryables:GetChildren()) do
+        if model:IsA("Model") and model:GetAttribute("Owner") == userId then
+            table.insert(mine, model)
+        end
+    end
+    return mine
+end
+
+local function openBoxes(items)
+    if inAuction then return end
+    local char = player.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    for _, model in ipairs(items) do
+        local prompt = model:FindFirstChild("OpenBoxPrompt", true)
+        if prompt and prompt:IsA("ProximityPrompt") then
+            if hrp then hrp.CFrame = model:GetPivot() * CFrame.new(0, 3, 0) end
+            task.wait(0.1)
+            fireproximityprompt(prompt)
+        end
+    end
+end
+
+local function waitForBoxesResolved(timeout)
+    local start = os.clock()
+    while os.clock() - start < timeout do
+        local allResolved = true
+        for _, model in ipairs(getCarryables()) do
+            local prompt = model:FindFirstChild("OpenBoxPrompt", true)
+            if prompt and prompt:IsA("ProximityPrompt") then
+                allResolved = false
+                break
+            end
+            local itemId = tostring(model:GetAttribute("ItemId") or "")
+            if itemId == "" then
+                allResolved = false
+                break
+            end
+        end
+        if allResolved then return true end
+        task.wait(0.3)
+    end
+    return false
+end
+
+local function pickupAll(items)
+    if inAuction then return end
+    local char = player.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    for _, model in ipairs(items) do
+        local base = model:FindFirstChild("Base")
+        local prompt = base and base:FindFirstChild("PickupPrompt")
+        if prompt and prompt:IsA("ProximityPrompt") then
+            if hrp then hrp.CFrame = model:GetPivot() * CFrame.new(0, 3, 0) end
+            task.wait(0.1)
+            fireproximityprompt(prompt)
+        end
+    end
+end
+
+local function claimLostItems()
+    if inAuction then return end
+    if not GetLostItems or not ClaimLostItem then return end
+    local char = player.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local totalClaimed = 0
+    for areaName, data in pairs(Areas) do
+        if type(data) == "table" and data.Mascot then
+            local result = GetLostItems:InvokeServer(areaName)
+            if type(result) == "table" and type(result.items) == "table" and next(result.items) then
+                local areasFolder = workspace:FindFirstChild("Areas")
+                local areaFolder = areasFolder and areasFolder:FindFirstChild(areaName)
+                local box = areaFolder and areaFolder:FindFirstChild("Lost and Found Box")
+                if box and hrp then
+                    hrp.CFrame = box:GetPivot() + Vector3.new(0, 5, 0)
+                    task.wait(0.3)
+                end
+                local claimed = 0
+                for guid in pairs(result.items) do
+                    ClaimLostItem:InvokeServer(areaName, guid)
+                    claimed += 1
+                    task.wait(0.4 + math.random() * 0.3)
+                end
+                totalClaimed += claimed
+            end
+        end
+    end
+    if totalClaimed > 0 then
+        notify("Auto Claim Lost — Claimed " .. tostring(totalClaimed) .. " item(s)")
+    end
+end
+
+local function claimDailyReward()
+    if not ClaimDailyReward then return end
+    local claimable = player:GetAttribute("DailyRewardClaimable")
+    if not claimable then return end
+    for i = 1, 3 do
+        ClaimDailyReward:InvokeServer()
+        task.wait(0.3)
+    end
+    notify("Auto Daily Reward — Claimed")
+end
+
+local function normalize(str)
+    return tostring(str):lower():match("^%s*(.-)%s*$")
+end
+
+local function getAuctionItemName()
+    for _, gui in ipairs(playerGui:GetChildren()) do
+        local container = gui:FindFirstChild("AuctionBiddingContainer", true)
+        if container then
+            local nameLabel = container:FindFirstChild("ItemName", true) or container:FindFirstChild("Name", true)
+            if nameLabel and nameLabel:IsA("TextLabel") then return nameLabel.Text end
+        end
+    end
+    return nil
+end
+
+local function getItemDefFromName(name)
+    local norm = normalize(name)
+    for _, def in pairs(Items) do
+        if def.Name and normalize(def.Name) == norm then return def end
+    end
+    return nil
+end
+
+local function findElements()
+    for _, gui in ipairs(playerGui:GetChildren()) do
+        local container = gui:FindFirstChild("AuctionBiddingContainer", true)
+        if container then
+            local track = container:FindFirstChild("Track", true)
+            if track then
+                local cursor = track:FindFirstChild("Cursor")
+                local zone = track:FindFirstChild("BidZone")
+                local bidBar = container:FindFirstChild("BidBarRow")
+                return cursor, zone, bidBar
+            end
+        end
+    end
+    return nil, nil, nil
+end
+
+local function shouldBid()
+    local cash = player:GetAttribute("Cash") or 0
+    if bidMode == "Always" then
+        return cash > 0
+    elseif bidMode == "Profitable" then
+        local itemName = getAuctionItemName()
+        if not itemName then return false end
+        local def = getItemDefFromName(itemName)
+        return def and def.BasePrice and def.BasePrice > 0 and cash >= def.BasePrice
+    elseif bidMode == "Specific" then
+        local itemName = getAuctionItemName()
+        if not itemName then return false end
+        local normItem = normalize(itemName)
+        for _, target in ipairs(specificItemNames) do
+            if target ~= "" and normalize(target) == normItem then return cash > 0 end
+        end
+        return false
+    end
+    return false
+end
+
+local function getMyPlot()
+    local plots = workspace:FindFirstChild("_Plots")
+    if not plots then return nil end
+    for _, plot in ipairs(plots:GetChildren()) do
+        if plot:GetAttribute("OwnerUserId") == userId then return plot end
+    end
+end
+
+local function getFreeSnapPoints()
+    local plot = getMyPlot()
+    if not plot then return {} end
+    local furniture = plot:FindFirstChild("Furniture")
+    local stock = plot:FindFirstChild("Stock")
+    if not furniture then return {} end
+    local usedSnaps = {}
+    if stock then
+        for _, item in ipairs(stock:GetChildren()) do
+            local sg = item:GetAttribute("ShelfGUID")
+            local sp = item:GetAttribute("SnapPointName")
+            if sg and sp then usedSnaps[sg.."|"..sp] = true end
+        end
+    end
+    local snaps = {}
+    for _, surface in ipairs(furniture:GetChildren()) do
+        local itemId = tostring(surface:GetAttribute("ItemId") or "")
+        local def = FurnitureModule.Items[itemId]
+        if def and def.Category == "Shelves" and selectedShelves[def.Name] then
+            local guid = surface:GetAttribute("GUID")
+            for _, desc in ipairs(surface:GetDescendants()) do
+                if desc:IsA("Attachment") and desc.Name:match("^SnapPoint") then
+                    local key = guid.."|"..desc.Name
+                    if not usedSnaps[key] then
+                        table.insert(snaps, { cf = desc.WorldCFrame, snapName = desc.Name, shelfGUID = guid })
+                    end
+                end
+            end
+        end
+    end
+    return snaps
+end
+
+local function isPlayerOnPlotFloor()
+    local char = player.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return false end
+    local plots = workspace:FindFirstChild("_Plots")
+    if not plots then return false end
+    for _, plot in ipairs(plots:GetChildren()) do
+        if plot:GetAttribute("OwnerUserId") == userId then
+            local base = plot:FindFirstChild("Base")
+            local floor = base and base:FindFirstChild("Floor")
+            if floor and floor:IsA("BasePart") then
+                local plotPos = floor.Position
+                local playerPos = hrp.Position
+                local size = floor.Size
+                local inX = math.abs(playerPos.X - plotPos.X) <= size.X / 2
+                local inZ = math.abs(playerPos.Z - plotPos.Z) <= size.Z / 2
+                local inY = playerPos.Y >= plotPos.Y and playerPos.Y <= plotPos.Y + 10
+                if inX and inZ and inY then return true end
+            end
+        end
+    end
+    return false
+end
+
+local function teleportToPlot()
+    if isPlayerOnPlotFloor() then return end
+    local char = player.Character or player.CharacterAdded:Wait()
+    local hrp = char:WaitForChild("HumanoidRootPart")
+    local plots = workspace:FindFirstChild("_Plots")
+    if not plots then return end
+    for _, plot in ipairs(plots:GetChildren()) do
+        if plot:GetAttribute("OwnerUserId") == userId then
+            local x = plot:GetAttribute("OriginX")
+            local y = plot:GetAttribute("OriginY")
+            local z = plot:GetAttribute("OriginZ")
+            if x and y and z then hrp.CFrame = CFrame.new(x, y + 5, z) end
+            return
+        end
+    end
+end
+
+local function shouldPlaceItem(entry, itemDef)
+    local mutators = getMutators(entry.Mutators)
+    if placeBlacklist.Favorited and entry.Favorited then return false end
+    if placeBlacklist.Mutated and hasMutators(mutators) then return false end
+    if placeBlacklist.Broken and isBroken(mutators) then return false end
+    if placeBlacklist.Dirty and isDirty(mutators) then return false end
+    if placeBlacklist.Safes and entry.SafeId ~= nil then return false end
+    local category = itemDef.Category
+    if placeBlacklist.Consumables and category == "Consumables" then return false end
+    if placeBlacklist.Accessories and category == "Accessories" then return false end
+    if placeBlacklist.Vehicles and (category == "Vehicles" or category == "Car Parts") then return false end
+    if placeBlacklist.Drinks and category == "Drinks" then return false end
+
+    if autoGradeBeforePlace then
+        if not entry.Grade or entry.Grade == "" then return false end
+    end
+
+    if autoCleanBeforePlace then
+        if isDirty(mutators) then return false end
+    end
+
+    return true
+end
+
+local function placeAllItems()
+    teleportToPlot()
+    task.wait(0.5)
+    if not getInventory then return end
+    local inventory = getInventory:InvokeServer()
+    if type(inventory) ~= "table" then return end
+    local snaps = getFreeSnapPoints()
+    if #snaps == 0 then return end
+    local snapIndex = 1
+    local placed = 0
+    for guid, entry in pairs(inventory) do
+        if snapIndex > #snaps then break end
+        local itemDef = Items[tostring(entry.ItemId)]
+        if not itemDef then continue end
+        if not shouldPlaceItem(entry, itemDef) then continue end
+        local snap = snaps[snapIndex]
+        local price = calcPrice(itemDef.BasePrice or 0, entry)
+        placeStockRemote:FireServer(guid, tostring(entry.ItemId), snap.cf, price, snap.shelfGUID, snap.snapName)
+        task.wait(0.3 + math.random() * 0.3)
+        snapIndex += 1
+        placed += 1
+    end
+    if placed > 0 then notify("Auto Place — Placed " .. tostring(placed) .. " item(s) on shelves") end
+end
+
+local function getCurrentUpgradeLevels()
+    if not GetUpgrades then return {} end
+    local result = GetUpgrades:InvokeServer()
+    if type(result) == "table" then return result end
+    return {}
+end
+
+local function runUpgrades()
+    if not BuyUpgrade or not UpgradesConfig then return end
+    local cash = player:GetAttribute("Cash") or 0
+    local levels = getCurrentUpgradeLevels()
+    for _, upgrade in ipairs(UpgradesConfig.Upgrades) do
+        if allUpgrades or selectedUpgrades[upgrade.id] then
+            local current = tonumber(levels[upgrade.id]) or 0
+            local maxLevel = upgrade.maxLevel or #upgrade.tiers
+            if current < maxLevel then
+                local tier = upgrade.tiers and upgrade.tiers[current + 1]
+                local cost = tier and (tier.Cost or tier.Price or 0) or 0
+                if cash >= cost then
+                    BuyUpgrade:InvokeServer(upgrade.id)
+                    task.wait(0.3)
+                end
+            end
+        end
+    end
+end
+
+local function runAutoWash()
+    if not GetWashSlotState or not GetWashableItems or not StartWash then return end
+    local state = GetWashSlotState:InvokeServer()
+    if type(state) ~= "table" then return end
+    local unlockedCount = state.unlockedCount or 1
+    local slots = state.slots or {}
+    local freeSlots = {}
+    local now = workspace:GetServerTimeNow()
+    for i = 1, unlockedCount do
+        local slotData = slots[tostring(i)] or slots[i]
+        if not slotData then
+            table.insert(freeSlots, i)
+        elseif slotData.Washed then
+            ClaimWashedItem:InvokeServer(i)
+            task.wait(0.3)
+            table.insert(freeSlots, i)
+        else
+            local done = now >= (slotData.StartTime or 0) + (slotData.Duration or 0)
+            if done then
+                CollectWash:InvokeServer(i)
+                task.wait(0.5)
+                ClaimWashedItem:InvokeServer(i)
+                task.wait(0.3)
+                table.insert(freeSlots, i)
+            end
+        end
+    end
+    if #freeSlots == 0 then return end
+    local result = GetWashableItems:InvokeServer()
+    if type(result) ~= "table" or type(result.items) ~= "table" then return end
+    local filtered = {}
+    for _, item in ipairs(result.items) do
+        local mutators = getMutators(item.data.Mutators)
+        if isBroken(mutators) then continue end
+        if hasMutators(mutators) then continue end
+        local rarity = itemRarity(item.data.ItemId)
+        if allWashRarities or selectedWashRarities[rarity] then table.insert(filtered, item) end
+    end
+    local slotIndex = 1
+    local washed = 0
+    for _, item in ipairs(filtered) do
+        if slotIndex > #freeSlots then break end
+        local slot = freeSlots[slotIndex]
+        local res = StartWash:InvokeServer(slot, item.guid, item.source, item.vehicleGUID or nil)
+        if res and res.success then slotIndex += 1 washed += 1 end
+        task.wait(0.3)
+    end
+    if washed > 0 then notify("Auto Wash — Washing " .. tostring(washed) .. " item(s)") end
+end
+
+local function runAutoGrade()
+    if not GetGradeSlotState or not GetGradableItems or not StartGrading then return end
+    local state = GetGradeSlotState:InvokeServer()
+    if type(state) ~= "table" then return end
+    local unlockedCount = state.unlockedCount or 1
+    local slots = state.slots or {}
+    local freeSlots = {}
+    local now = workspace:GetServerTimeNow()
+    for i = 1, unlockedCount do
+        local slotData = slots[tostring(i)] or slots[i]
+        if not slotData then
+            table.insert(freeSlots, i)
+        elseif slotData.Grade then
+            ClaimGradedItem:InvokeServer(i)
+            task.wait(0.3)
+            table.insert(freeSlots, i)
+        else
+            local done = now >= (slotData.StartTime or 0) + (slotData.Duration or 0)
+            if done then
+                CollectGrade:InvokeServer(i)
+                task.wait(0.5)
+                ClaimGradedItem:InvokeServer(i)
+                task.wait(0.3)
+                table.insert(freeSlots, i)
+            end
+        end
+    end
+    if #freeSlots == 0 then return end
+    local result = GetGradableItems:InvokeServer()
+    if type(result) ~= "table" or type(result.items) ~= "table" then return end
+    local filtered = {}
+    for _, item in ipairs(result.items) do
+        if item.data.Favorited then continue end
+        local mutators = getMutators(item.data.Mutators)
+        if isBroken(mutators) then continue end
+        if hasMutators(mutators) then continue end
+        if (item.data.Condition or 0) < 50 then continue end
+        local rarity = itemRarity(item.data.ItemId)
+        if allGradeRarities or selectedGradeRarities[rarity] then table.insert(filtered, item) end
+    end
+    if gradeMethod == "Best Item" then
+        table.sort(filtered, function(a, b) return itemBasePrice(a.data.ItemId) > itemBasePrice(b.data.ItemId) end)
+    elseif gradeMethod == "Worst Item" then
+        table.sort(filtered, function(a, b) return (a.data.Duration or 999) < (b.data.Duration or 999) end)
+    elseif gradeMethod == "Rarity" then
+        table.sort(filtered, function(a, b)
+            return (rarityOrder[itemRarity(a.data.ItemId)] or 0) > (rarityOrder[itemRarity(b.data.ItemId)] or 0)
+        end)
+    end
+    local slotIndex = 1
+    local graded = 0
+    for _, item in ipairs(filtered) do
+        if slotIndex > #freeSlots then break end
+        local slot = freeSlots[slotIndex]
+        local res = StartGrading:InvokeServer(slot, item.guid, item.source, item.vehicleGUID or nil)
+        if res and res.success then slotIndex += 1 graded += 1 end
+        task.wait(0.3)
+    end
+    if graded > 0 then notify("Auto Grade — Grading " .. tostring(graded) .. " item(s)") end
+end
+
+local function runAutoDrinks()
+    if not UseEnergyDrink or not getInventory then return end
+    if next(selectedDrinkIds) == nil then return end
+    local inv = getInventory:InvokeServer()
+    if type(inv) ~= "table" then return end
+    for guid, entry in pairs(inv) do
+        local itemId = tostring(entry.ItemId)
+        for drinkId, enabled in pairs(selectedDrinkIds) do
+            if not enabled then continue end
+            local drinkDef = EnergyDrinks[drinkId]
+            if drinkDef and drinkDef.ItemId == itemId then
+                local activeAttr = player:GetAttribute("ActiveDrink_" .. tostring(drinkId))
+                if activeAttr and activeAttr > workspace:GetServerTimeNow() then continue end
+                UseEnergyDrink:FireServer(guid)
+                notify("Auto Drinks — Used " .. tostring(drinkDef.Name))
+                task.wait(0.3)
+                break
+            end
+        end
+    end
+end
+
+local function startMasterLoop()
+    if masterLoopRunning then return end
+    if not (autoFarmEnabled or autoFarmEverything) then return end
+
+    masterLoopRunning = true
+    masterLoopCoroutine = task.spawn(function()
+        while autoFarmEnabled or autoFarmEverything do
+            if currentState == AuctionState.IDLE then
+                currentState = AuctionState.SEARCHING
+            elseif currentState == AuctionState.SEARCHING then
+                local joined = attemptJoinAuction()
+                if not joined then
+                    task.wait(1)
+                end
+            elseif currentState == AuctionState.JOINING then
+                task.wait(0.5)
+            elseif currentState == AuctionState.IN_AUCTION then
+                while inAuction do
+                    task.wait(0.5)
+                end
+                processContainer()
+            elseif currentState == AuctionState.PROCESSING then
+                task.wait(0.5)
+            elseif currentState == AuctionState.FINISHED then
+                currentState = AuctionState.SEARCHING
+            end
+            task.wait(0.1)
+        end
+        masterLoopRunning = false
+        masterLoopCoroutine = nil
+    end)
+end
+
+if UpdateCurrentWinningBid then
+    UpdateCurrentWinningBid.OnClientEvent:Connect(function(amount, winner)
+        if not inAuction then return end
+        if thresholdCheckedForAuction then return end
+        thresholdCheckedForAuction = true
+        if minAuctionThreshold > 0 and amount < minAuctionThreshold then
+            notify("Threshold — Bid $" .. tostring(math.floor(amount)) .. " below $" .. tostring(minAuctionThreshold) .. ", leaving")
+            LeaveAuction:InvokeServer()
+        end
+    end)
+end
+
+if ToggleBiddingUI then
+    ToggleBiddingUI.OnClientEvent:Connect(function(open)
+        inAuction = open == true
+        if inAuction then
+            notify("Auto Bid — Auction started")
+            thresholdCheckedForAuction = false
+            if currentState == AuctionState.JOINING then
+                currentState = AuctionState.IN_AUCTION
+            end
+        else
+            notify("Auto Farm — Auction ended")
+        end
+    end)
+end
+
+if LostFoundOverride then
+    LostFoundOverride.OnClientEvent:Connect(function(data)
+        if type(data) == "table" and autoFarmEnabled then
+            LostFoundOverride:FireServer(true)
+        end
+    end)
+end
+
+if showOffer and respondOffer then
+    showOffer.OnClientEvent:Connect(function(npcId, _, _, offerPrice, basePrice)
+        if not autoAcceptOffers and not autoDeclineEnabled then return end
+        if type(offerPrice) ~= "number" or type(basePrice) ~= "number" or basePrice <= 0 then return end
+        local pct = (offerPrice - basePrice) / basePrice
+        if autoAcceptOffers then
+            local accepted = pct >= minPercent
+            respondOffer:FireServer(npcId, accepted)
+            notify("Auto Offers — " .. (accepted and "Accepted" or "Declined") .. " ($" .. tostring(math.floor(offerPrice)) .. ")")
+        elseif autoDeclineEnabled then
+            respondOffer:FireServer(npcId, false)
+            notify("Auto Decline — Declined ($" .. tostring(math.floor(offerPrice)) .. ")")
+        end
+    end)
+end
+
+local rayfieldLibrary = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
+
+local mainWindow = rayfieldLibrary:CreateWindow({
+    Name = "Cactus Hub • discord.gg/cactushub",
+    Icon = 0,
+    LoadingTitle = "Loading",
+    LoadingSubtitle = "Please wait...",
+    Theme = "Default",
+    ToggleUIKeybind = "K",
+    DisableRayfieldPrompts = false,
+    DisableBuildWarnings = true,
+    ConfigurationSaving = { Enabled = true, FolderName = "CactusHub", FileName = "Config" },
+    Discord = { Enabled = true, Invite = "cactushub", RememberJoins = true },
+    KeySystem = false,
+})
+
+local mainTab = mainWindow:CreateTab("Main", "home")
+local farmingTab = mainWindow:CreateTab("Farming", 4483362458)
+local gameTab = mainWindow:CreateTab("Game", "map")
+local shopTab = mainWindow:CreateTab("Shop", "tag")
+local settingsTab = mainWindow:CreateTab("Settings", "settings")
+
+mainTab:CreateSection("Community")
+mainTab:CreateButton({
+    Name = "Join Us ( Copy Discord Link )",
+    Callback = function()
+        setclipboard("https://discord.gg/cactushub")
+        rayfieldLibrary:Notify({ Title = "Copied!", Content = "Discord invite link copied to clipboard.", Duration = 3 })
+    end,
+})
+
+mainTab:CreateSection("Enabled By Default")
+mainTab:CreateParagraph({ Title = "Anti AFK", Content = "[+] Anti AFK is active" })
+
+mainTab:CreateSection("Update Log")
+mainTab:CreateParagraph({
+    Title = "Update Log",
+    Content = "[+] Auto Place blacklist dropdown\n[+] Auto Place skips items already on plot\n[+] Auto Decline from customers\n[+] Farming cooldown when car is full\n[+] Dynamic auction areas from game data\n[+] Per‑garage selection with entry cost\n[+] Auto Grade before placing\n[+] Auto Clean before placing\n[+] Disable notifications toggle\n[/] Fixed auto farm going to garages you cant afford\n[/] Fixed drinks not handling all selected types\n[/] Fixed wash and grade skipping valid items\n[/] Fixed upgrade purchases\n[/] Fixed race condition – strict state machine, master loop owns joining\n[/] Removed all pcall and safeGet wrappers"
+})
+
+local autoBidToggle
+local autoFarmAuctionToggle
+local autoPickupToggle
+local autoUnloadToggle
+local fullFarmToggle
+
+farmingTab:CreateSection("Auction")
+
+fullFarmToggle = farmingTab:CreateToggle({
+    Name = "Auto Farm Everything [FARMING TAB ONLY]",
+    CurrentValue = false,
+    Flag = "AutoFarmEverything",
+    Callback = function(val)
+        if val then
+            if not selectedArea then
+                notify("Select Auction Area first")
+                task.defer(function() fullFarmToggle:Set(false) end)
+                return
+            end
+            if bidMode == "Specific" then
+                local hasItem = false
+                for _, n in ipairs(specificItemNames) do
+                    if n ~= "" then hasItem = true break end
+                end
+                if not hasItem then
+                    notify("Select Bid Method first")
+                    task.defer(function() fullFarmToggle:Set(false) end)
+                    return
+                end
+            end
+            autoFarmEverything = true
+            autoBidEnabled = true
+            autoFarmEnabled = true
+            autoPickupEnabled = true
+            autoUnloadEnabled = true
+            task.defer(function()
+                if autoBidToggle then autoBidToggle:Set(true) end
+                if autoFarmAuctionToggle then autoFarmAuctionToggle:Set(true) end
+                if autoPickupToggle then autoPickupToggle:Set(true) end
+                if autoUnloadToggle then autoUnloadToggle:Set(true) end
+            end)
+            notify("Auto Farm Everything — Started")
+            fullGarageDump()
+            currentState = AuctionState.SEARCHING
+            startMasterLoop()
+        else
+            autoFarmEverything = false
+            autoBidEnabled = false
+            autoFarmEnabled = false
+            autoPickupEnabled = false
+            autoUnloadEnabled = false
+            task.defer(function()
+                if autoBidToggle then autoBidToggle:Set(false) end
+                if autoFarmAuctionToggle then autoFarmAuctionToggle:Set(false) end
+                if autoPickupToggle then autoPickupToggle:Set(false) end
+                if autoUnloadToggle then autoUnloadToggle:Set(false) end
+            end)
+            notify("Auto Farm Everything — Stopped")
+        end
+    end,
+})
+
+autoBidToggle = farmingTab:CreateToggle({
+    Name = "Auto Bid",
+    CurrentValue = false,
+    Flag = "AutoBidToggle",
+    Callback = function(val)
+        autoBidEnabled = val
+        if not val then
+            if connection then connection:Disconnect() connection = nil end
+        else
+            notify("Auto Bid — Enabled")
+            if BidEvent then
+                connection = RunService.Heartbeat:Connect(function()
+                    if not autoBidEnabled then return end
+                    if not shouldBid() then return end
+                    local cursor, zone, bidBar = findElements()
+                    if not cursor or not zone or not bidBar then return end
+                    if not bidBar.Visible then return end
+                    local cursorPos = cursor.Position.X.Scale
+                    local zoneStart = zone.Position.X.Scale
+                    local zoneWidth = zone.Size.X.Scale
+                    local inZone = cursorPos >= zoneStart - 0.0075 and cursorPos <= zoneStart + zoneWidth + 0.0075
+                    if inZone then
+                        local now = tick()
+                        local jitter = 0.15 + math.random() * 0.15
+                        if now - lastBidTime < BID_COOLDOWN + jitter then return end
+                        lastBidTime = now
+                        BidEvent:FireServer()
+                    end
+                end)
+            end
+        end
+    end,
+})
+
+farmingTab:CreateDropdown({
+    Name = "Bid Mode",
+    Options = { "Always Bid", "Bid Profitable Only (Broken, Not Recommended)", "Bid Specific Item" },
+    CurrentOption = "Always Bid",
+    Flag = "BidMode",
+    Callback = function(val)
+        if val == "Always Bid" then bidMode = "Always"
+        elseif val == "Bid Profitable Only (Broken, Not Recommended)" then bidMode = "Profitable"
+        elseif val == "Bid Specific Item" then bidMode = "Specific"
+        end
+    end,
+})
+
+farmingTab:CreateInput({ Name = "Item Name 1", PlaceholderText = "e.g. Safe (any safe)", RemoveTextAfterFocusLost = false, Flag = "SpecificItem1", Callback = function(val) specificItemNames[1] = val end })
+farmingTab:CreateInput({ Name = "Item Name 2", PlaceholderText = "e.g. Trophy", RemoveTextAfterFocusLost = false, Flag = "SpecificItem2", Callback = function(val) specificItemNames[2] = val end })
+farmingTab:CreateInput({ Name = "Item Name 3", PlaceholderText = "e.g. Lost Book", RemoveTextAfterFocusLost = false, Flag = "SpecificItem3", Callback = function(val) specificItemNames[3] = val end })
+
+farmingTab:CreateInput({
+    Name = "Min Auction Starting Bid Threshold ($)",
+    PlaceholderText = "e.g. 500 (0 = disabled)",
+    RemoveTextAfterFocusLost = false,
+    Flag = "MinAuctionThreshold",
+    Callback = function(val) minAuctionThreshold = tonumber(val) or 0 end,
+})
+
+local garageEntries = {}
+for areaName, areaData in pairs(Areas) do
+    if type(areaData) == "table" then
+        local garageIds = {}
+        if areaData.GarageIds then
+            for id in pairs(areaData.GarageIds) do table.insert(garageIds, id) end
+        elseif areaData.SimpleGarageId then
+            table.insert(garageIds, areaData.SimpleGarageId)
+        end
+        for _, id in ipairs(garageIds) do
+            local garageData = GarageConfig[id]
+            if garageData then
+                local entryCost = garageData.EntryCost and garageData.EntryCost.Min or 0
+                local label = areaName .. " - " .. garageData.Name .. " ($" .. tostring(entryCost) .. ")"
+                table.insert(garageEntries, {label = label, cost = entryCost, area = areaName, garageId = id})
+            end
+        end
+    end
+end
+table.sort(garageEntries, function(a, b) return a.cost < b.cost end)
+local garageOptions = {}
+local garageOptionMap = {}
+for _, entry in ipairs(garageEntries) do
+    table.insert(garageOptions, entry.label)
+    garageOptionMap[entry.label] = {area = entry.area, garageId = entry.garageId}
+end
+
+farmingTab:CreateDropdown({
+    Name = "Select Auction containers to focus on",
+    Options = garageOptions,
+    CurrentOption = garageOptions[1] or "None",
+    Flag = "SelectedGarage",
+    Callback = function(val)
+        if type(val) == "table" then val = val[1] or garageOptions[1] end
+        if val and garageOptionMap[val] then
+            local info = garageOptionMap[val]
+            selectedArea = info.area
+            selectedGarageId = info.garageId
+        else
+            selectedArea = nil
+            selectedGarageId = nil
+        end
+    end,
+})
+
+autoFarmAuctionToggle = farmingTab:CreateToggle({
+    Name = "Auto Farm Auction",
+    CurrentValue = false,
+    Flag = "AutoFarmToggle",
+    Callback = function(val)
+        autoFarmEnabled = val
+        if val then
+            currentState = AuctionState.SEARCHING
+            startMasterLoop()
+        end
+    end,
+})
+
+autoPickupToggle = farmingTab:CreateToggle({
+    Name = "Auto Pickup",
+    CurrentValue = false,
+    Flag = "AutoPickupToggle",
+    Callback = function(val)
+        autoPickupEnabled = val
+        if val and not pickupLoopRunning then
+            pickupLoopRunning = true
+            task.spawn(function()
+                while autoPickupEnabled do
+                    if not inAuction then
+                        local allItems = getCarryables()
+                        if #allItems == 0 then task.wait(1) continue end
+                        openBoxes(allItems)
+                        local resolved = waitForBoxesResolved(8)
+                        if not resolved then
+                            notify("Auto Pickup — Some boxes took too long, continuing anyway")
+                        end
+                        allItems = getCarryables()
+                        local eligible = {}
+                        for _, model in ipairs(allItems) do
+                            if getCarryableValue(model) >= minPickupValue then
+                                table.insert(eligible, model)
+                            end
+                        end
+                        if #eligible == 0 then
+                            notify("Auto Pickup — No items meet min value $" .. tostring(minPickupValue))
+                            task.wait(1)
+                            continue
+                        end
+                        local currentWeight, maxWeight = getVehicleCurrentWeight()
+                        if maxWeight > 0 and currentWeight >= maxWeight then
+                            notify("Auto Pickup — Vehicle overweight, skipping")
+                            task.wait(1)
+                            continue
+                        end
+                        if getVehicleDistance() > 10 then
+                            notify("Auto Pickup — Car too far, respawning")
+                            spawnAndEnterCar()
+                        end
+                        for _, model in ipairs(eligible) do
+                            local guid = model:GetAttribute("ItemsWonGUID")
+                            if guid and RepairWonItem then
+                                RepairWonItem:InvokeServer(guid)
+                                task.wait(0.3 + math.random() * 0.2)
+                            end
+                        end
+                        notify("Auto Pickup — Picking up " .. tostring(#eligible) .. " item(s)")
+                        pickupAll(eligible)
+                        notify("Auto Pickup — Done")
+                        task.wait(0.5)
+                    else
+                        task.wait(1)
+                    end
+                end
+                pickupLoopRunning = false
+            end)
+        end
+    end,
+})
+
+farmingTab:CreateInput({
+    Name = "Min Item Value to Pickup ($)",
+    PlaceholderText = "e.g. 100 (0 = pick up all)",
+    RemoveTextAfterFocusLost = false,
+    Flag = "MinPickupValue",
+    Callback = function(val) minPickupValue = tonumber(val) or 0 end,
+})
+
+farmingTab:CreateSection("Other")
+
+autoUnloadToggle = farmingTab:CreateToggle({
+    Name = "Auto Unload",
+    CurrentValue = false,
+    Flag = "AutoUnload",
+    Callback = function(val)
+        autoUnloadEnabled = val
+        if val and not unloadLoopRunning then
+            unloadLoopRunning = true
+            task.spawn(function()
+                while autoUnloadEnabled do
+                    if not inAuction then
+                        if unloadMode == "Unload when full" then
+                            if isVehicleFull() then doUnload() end
+                            task.wait(5)
+                        elseif unloadMode == "Unload every 20s" then
+                            if vehicleHasItems() then doUnload() end
+                            task.wait(20)
+                        else
+                            task.wait(5)
+                        end
+                    else
+                        task.wait(1)
+                    end
+                end
+                unloadLoopRunning = false
+            end)
+        end
+    end,
+})
+
+farmingTab:CreateDropdown({
+    Name = "Unload Mode",
+    Options = { "Unload when full", "Unload every 20s" },
+    CurrentOption = "Unload when full",
+    Flag = "UnloadMode",
+    Callback = function(val) unloadMode = val end,
+})
+
+gameTab:CreateSection("Auto Claims")
+
+gameTab:CreateToggle({
+    Name = "Auto Claim Daily Reward",
+    CurrentValue = false,
+    Flag = "AutoDailyReward",
+    Callback = function(val)
+        autoDailyRewardEnabled = val
+        if val and not dailyRewardLoopRunning then
+            dailyRewardLoopRunning = true
+            task.spawn(function()
+                claimDailyReward()
+                while autoDailyRewardEnabled do
+                    task.wait(60)
+                    claimDailyReward()
+                end
+                dailyRewardLoopRunning = false
+            end)
+        end
+    end,
+})
+
+gameTab:CreateToggle({
+    Name = "Auto Claim Lost& Found Items",
+    CurrentValue = false,
+    Flag = "AutoClaimLost",
+    Callback = function(val)
+        autoClaimLostEnabled = val
+        if val and not lostLoopRunning then
+            lostLoopRunning = true
+            task.spawn(function()
+                while autoClaimLostEnabled do
+                    if not inAuction then claimLostItems() end
+                    task.wait(1)
+                end
+                lostLoopRunning = false
+            end)
+        end
+    end,
+})
+
+gameTab:CreateToggle({
+    Name = "Auto Claim Collection Rewards",
+    CurrentValue = false,
+    Flag = "AutoClaimCollections",
+    Callback = function(val)
+        autoClaimCollections = val
+        if val and not collectionLoopRunning then
+            collectionLoopRunning = true
+            task.spawn(function()
+                while autoClaimCollections do
+                    if GetState and ClaimMilestone then
+                        local state = GetState:InvokeServer()
+                        if state and state.areaCatalog then
+                            for area, areaData in pairs(state.areaCatalog) do
+                                if type(areaData) == "table" and areaData.claimable then
+                                    ClaimMilestone:InvokeServer(area)
+                                end
+                            end
+                        end
+                    end
+                    task.wait(1)
+                end
+                collectionLoopRunning = false
+            end)
+        end
+    end,
+})
+
+gameTab:CreateToggle({
+    Name = "Auto Claim Achievements",
+    CurrentValue = false,
+    Flag = "AutoClaimAchievements",
+    Callback = function(val)
+        autoClaimAchievements = val
+        if val and not achievementLoopRunning then
+            achievementLoopRunning = true
+            task.spawn(function()
+                while autoClaimAchievements do
+                    if GetStatus and ClaimAchievement then
+                        local achievements = GetStatus:InvokeServer()
+                        if type(achievements) == "table" then
+                            local claimed = 0
+                            for id, data in pairs(achievements) do
+                                if type(data) == "table" and data.Status == "claimable" then
+                                    ClaimAchievement:InvokeServer(id)
+                                    claimed += 1
+                                end
+                            end
+                            if claimed > 0 then notify("Auto Achievements — Claimed " .. tostring(claimed) .. " item(s)") end
+                        end
+                    end
+                    task.wait(1)
+                end
+                achievementLoopRunning = false
+            end)
+        end
+    end,
+})
+
+gameTab:CreateSection("Upgrades")
+
+local upgradeOptions = {"Any"}
+local upgradeIdByName = {}
+if UpgradesConfig then
+    for _, u in ipairs(UpgradesConfig.Upgrades) do
+        table.insert(upgradeOptions, u.name)
+        upgradeIdByName[u.name] = u.id
+    end
+end
+
+gameTab:CreateDropdown({
+    Name = "Upgrades to Buy",
+    Options = upgradeOptions,
+    CurrentOption = {"Any"},
+    MultipleOptions = true,
+    Flag = "SelectedUpgrades",
+    Callback = function(val)
+        selectedUpgrades = {}
+        allUpgrades = false
+        for _, v in ipairs(val) do
+            if v == "Any" then allUpgrades = true break end
+            if upgradeIdByName[v] then selectedUpgrades[upgradeIdByName[v]] = true end
+        end
+    end,
+})
+
+gameTab:CreateToggle({
+    Name = "Auto Buy Upgrades",
+    CurrentValue = false,
+    Flag = "AutoUpgrade",
+    Callback = function(val)
+        autoUpgradeEnabled = val
+        if val and not upgradeLoopRunning then
+            upgradeLoopRunning = true
+            task.spawn(function()
+                while autoUpgradeEnabled do
+                    runUpgrades()
+                    task.wait(5)
+                end
+                upgradeLoopRunning = false
+            end)
+        end
+    end,
+})
+
+gameTab:CreateSection("Wash")
+
+local rarityOptions = {"Any", "Junk", "Uncommon", "Rare", "Epic", "Legendary", "Mythical"}
+
+gameTab:CreateDropdown({
+    Name = "Wash Rarities",
+    Options = rarityOptions,
+    CurrentOption = {"Any"},
+    MultipleOptions = true,
+    Flag = "WashRarities",
+    Callback = function(val)
+        selectedWashRarities = {}
+        allWashRarities = false
+        for _, v in ipairs(val) do
+            if v == "Any" then allWashRarities = true break end
+            selectedWashRarities[v] = true
+        end
+    end,
+})
+
+gameTab:CreateToggle({
+    Name = "Auto Wash Items",
+    CurrentValue = false,
+    Flag = "AutoWash",
+    Callback = function(val)
+        autoWashEnabled = val
+        if val and not washLoopRunning then
+            washLoopRunning = true
+            task.spawn(function()
+                while autoWashEnabled do
+                    runAutoWash()
+                    task.wait(1)
+                end
+                washLoopRunning = false
+            end)
+        end
+    end,
+})
+
+gameTab:CreateSection("Grade")
+
+gameTab:CreateDropdown({
+    Name = "Grading Method",
+    Options = { "Rarity", "Best Item", "Worst Item" },
+    CurrentOption = "Rarity",
+    Flag = "GradeMethod",
+    Callback = function(val) gradeMethod = val end,
+})
+
+gameTab:CreateDropdown({
+    Name = "Grade Rarities",
+    Options = rarityOptions,
+    CurrentOption = {"Any"},
+    MultipleOptions = true,
+    Flag = "GradeRarities",
+    Callback = function(val)
+        selectedGradeRarities = {}
+        allGradeRarities = false
+        for _, v in ipairs(val) do
+            if v == "Any" then allGradeRarities = true break end
+            selectedGradeRarities[v] = true
+        end
+    end,
+})
+
+gameTab:CreateToggle({
+    Name = "Auto Grade Items",
+    CurrentValue = false,
+    Flag = "AutoGrade",
+    Callback = function(val)
+        autoGradeEnabled = val
+        if val and not gradeLoopRunning then
+            gradeLoopRunning = true
+            task.spawn(function()
+                while autoGradeEnabled do
+                    runAutoGrade()
+                    task.wait(1)
+                end
+                gradeLoopRunning = false
+            end)
+        end
+    end,
+})
+
+shopTab:CreateSection("Offers")
+
+shopTab:CreateToggle({
+    Name = "Auto Accept Offers",
+    CurrentValue = false,
+    Flag = "AutoAcceptOffers",
+    Callback = function(val) autoAcceptOffers = val end,
+})
+
+shopTab:CreateSlider({
+    Name = "Min % of Base Price",
+    Range = {-100, 100},
+    Increment = 1,
+    CurrentValue = 0,
+    Flag = "MinPercent",
+    Callback = function(val) minPercent = val / 100 end,
+})
+
+shopTab:CreateToggle({
+    Name = "Auto Decline Offers",
+    CurrentValue = false,
+    Flag = "AutoDeclineOffers",
+    Callback = function(val) autoDeclineEnabled = val end,
+})
+
+shopTab:CreateSection("Stock")
+
+shopTab:CreateDropdown({
+    Name = "Auto Place — Items to Skip",
+    Options = { "Mutated", "Safes", "Consumables", "Accessories", "Vehicles", "Drinks", "Broken", "Dirty", "Favorited" },
+    CurrentOption = {},
+    MultipleOptions = true,
+    Flag = "PlaceBlacklist",
+    Callback = function(val)
+        placeBlacklist = {
+            Mutated = false, Safes = false, Consumables = false,
+            Accessories = false, Vehicles = false, Drinks = false,
+            Broken = false, Dirty = false, Favorited = false,
+        }
+        for _, v in ipairs(val) do
+            placeBlacklist[v] = true
+        end
+    end,
+})
+
+shopTab:CreateToggle({
+    Name = "Auto Grade before placing",
+    CurrentValue = false,
+    Flag = "AutoGradeBeforePlace",
+    Callback = function(val) autoGradeBeforePlace = val end,
+})
+
+shopTab:CreateToggle({
+    Name = "Auto Clean before placing (skip dirty items)",
+    CurrentValue = false,
+    Flag = "AutoCleanBeforePlace",
+    Callback = function(val) autoCleanBeforePlace = val end,
+})
+
+shopTab:CreateToggle({
+    Name = "Auto Place Items",
+    CurrentValue = false,
+    Flag = "AutoPlaceItems",
+    Callback = function(val)
+        autoPlaceItems = val
+        if val and not placeLoopRunning then
+            placeLoopRunning = true
+            task.spawn(function()
+                while autoPlaceItems do
+                    if ActionQueue.acquire("AutoPlace", 2) then
+                        placeAllItems()
+                        ActionQueue.release("AutoPlace")
+                    end
+                    task.wait(15)
+                end
+                placeLoopRunning = false
+            end)
+        end
+    end,
+})
+
+shopTab:CreateDropdown({
+    Name = "Place on these shelves",
+    Options = shelfNames,
+    CurrentOption = shelfNames,
+    MultipleOptions = true,
+    Flag = "ShelfSelection",
+    Callback = function(selected)
+        selectedShelves = {}
+        if type(selected) == "table" then
+            for _, v in ipairs(selected) do selectedShelves[v] = true end
+        end
+        if next(selectedShelves) == nil then
+            for _, n in ipairs(shelfNames) do selectedShelves[n] = true end
+        end
+    end,
+})
+
+shopTab:CreateSection("Drinks")
+
+local drinkOptions = {}
+for id, def in pairs(EnergyDrinks) do
+    table.insert(drinkOptions, def.Name)
+end
+
+shopTab:CreateDropdown({
+    Name = "Select Drinks",
+    Options = drinkOptions,
+    CurrentOption = {},
+    MultipleOptions = true,
+    Flag = "SelectedDrinks",
+    Callback = function(val)
+        selectedDrinkIds = {}
+        for id, def in pairs(EnergyDrinks) do
+            for _, selected in ipairs(val) do
+                if def.Name == selected then
+                    selectedDrinkIds[id] = true
+                end
+            end
+        end
+    end,
+})
+
+shopTab:CreateToggle({
+    Name = "Auto Use Drinks",
+    CurrentValue = false,
+    Flag = "AutoUseDrinks",
+    Callback = function(val)
+        autoUseDrinksEnabled = val
+        if val and not drinksLoopRunning then
+            drinksLoopRunning = true
+            task.spawn(function()
+                while autoUseDrinksEnabled do
+                    runAutoDrinks()
+                    task.wait(3)
+                end
+                drinksLoopRunning = false
+            end)
+        end
+    end,
+})
+
+settingsTab:CreateSection("UI")
+
+settingsTab:CreateToggle({
+    Name = "Disable notifications ",
+    CurrentValue = false,
+    Flag = "DisableNotifications",
+    Callback = function(val)
+        notificationsDisabled = val
+        if val then
+            for _, gui in ipairs(playerGui:GetChildren()) do
+                if gui:IsA("ScreenGui") and gui.Name:lower():match("toast") then
+                    gui.Enabled = false
+                end
+            end
+        else
+            for _, gui in ipairs(playerGui:GetChildren()) do
+                if gui:IsA("ScreenGui") and gui.Name:lower():match("toast") then
+                    gui.Enabled = true
+                end
+            end
+        end
+    end,
+})
+
+settingsTab:CreateSection("performance")
+
+settingsTab:CreateToggle({
+    Name = "fps boost",
+    CurrentValue = false,
+    Flag = "FpsBoost",
+    Callback = function(val)
+        fpsBoostEnabled = val
+        if val then
+            setfpscap(0)
+            local b = game:GetService("Lighting")
+            local c = UserSettings():GetService("UserGameSettings")
+            c.SavedQualityLevel = Enum.SavedQualitySetting.QualityLevel1
+            workspace.LevelOfDetail = Enum.ModelLevelOfDetail.Disabled
+            b.Technology = Enum.Technology.Compatibility
+            b.GlobalShadows = false
+            b.Brightness = 1
+            b.FogEnd = 9e9
+            for _, e in ipairs(b:GetChildren()) do
+                if e:IsA("PostEffect") then e.Enabled = false
+                elseif e:IsA("Atmosphere") then
+                    e.Density = 0 e.Offset = 0 e.Haze = 0 e.Glare = 0 e.Color = Color3.new(0,0,0)
+                elseif e:IsA("Sky") then e.CelestialBodiesShown = false end
+            end
+            for _, f in ipairs(workspace:GetDescendants()) do
+                if f:IsA("BasePart") then f.CastShadow = false end
+                if f:IsA("SurfaceAppearance") then f:Destroy() end
+            end
+        end
+    end,
+})
+
+settingsTab:CreateToggle({
+    Name = "optimize gpu rendering",
+    CurrentValue = false,
+    Flag = "OptimizeRendering",
+    Callback = function(val)
+        rendering3dEnabled = not val
+        RunService:Set3dRenderingEnabled(rendering3dEnabled)
+    end,
+})
+
+settingsTab:CreateToggle({
+    Name = "optimize ram",
+    CurrentValue = false,
+    Flag = "OptimizeRAM",
+    Callback = function(val)
+        if val then
+            for _, obj in ipairs(workspace["BBOW Builder Assets"]["Other Buildings and  Decoration"]:GetChildren()) do
+                obj:Destroy()
+            end
+            for _, obj in ipairs(workspace["BBOW Builder Assets"]["Lampposts"]:GetChildren()) do
+                obj:Destroy()
+            end
+        end
+    end,
+})
+
+settingsTab:CreateToggle({
+    Name = "optimize cpu",
+    CurrentValue = false,
+    Flag = "OptimizeCPU",
+    Callback = function(val)
+        if val then
+            for _, obj in ipairs(workspace["BBOW Builder Assets"]["Other Buildings and  Decoration"]:GetChildren()) do
+                obj:Destroy()
+            end
+            for _, obj in ipairs(workspace["BBOW Builder Assets"]["Lampposts"]:GetChildren()) do
+                obj:Destroy()
+            end
+        end
+    end,
+})
+
+rayfieldLibrary:LoadConfiguration()
